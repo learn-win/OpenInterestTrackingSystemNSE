@@ -1,0 +1,53 @@
+name: nifty-cron
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (UTC). Adjust if needed
+  workflow_dispatch:        # allows manual run from Actions UI
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  run-nifty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account JSON (from secret)
+        if: ${{ secrets.NIFTY_SA_JSON != '' }}
+        run: |
+          echo "$NIFTY_SA_JSON" > service-account.json
+          chmod 600 service-account.json
+        shell: bash
+
+      - name: Run nifty.py
+        env:
+          # Path to service account file the script expects
+          SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
+          # If you prefer, you can configure these values as secrets or variables:
+          SYMBOL: ${{ secrets.SYMBOL }}                # optional (or leave in script)
+          FALLBACK_CSV: ${{ secrets.FALLBACK_CSV }}    # optional path or repo file
+          ALLOW_FALLBACK: ${{ secrets.ALLOW_FALLBACK }}# optional "true"/"false"
+        run: |
+          python nifty.py
+        shell: bash
+
+      - name: Upload output artifact (output.json if present)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nifty-output
+          path: output.json
