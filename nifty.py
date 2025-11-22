@@ -2,8 +2,12 @@
 """
 nifty.py
 
-Single-run NIFTY/BANKNIFTY pct-COI ranking alert script for PythonAnywhere.
-Uses requests with proper headers to bypass NSE restrictions.
+Single-run NIFTY/BANKNIFTY pct-COI ranking alert script.
+Fetches option-chain from NSE, computes pct-COI ranking, and logs alerts/history to Google Sheets.
+
+Notes:
+- SERVICE_ACCOUNT_FILE is read from environment variable SERVICE_ACCOUNT_FILE (recommended).
+- No fallback CSV mechanism is present.
 """
 
 import os
@@ -20,20 +24,25 @@ import time
 import random
 
 # ---------------- USER CONFIG ----------------
-SYMBOL = "NIFTY"                     # "NIFTY" or "BANKNIFTY"
-NEAREST_STRIKES = 10                 # nearest strikes to analyze
-ALERT_TOP_N = 3                      # top N strikes by pct_coi per side
-SPREADSHEET_NAME = "Nifty_OI_Alerts_and_History_pctCOI"
-HISTORY_SHEET = "history"
-ALERTS_SHEET = "alerts"
+SYMBOL = os.getenv("SYMBOL", "NIFTY")       # "NIFTY" or "BANKNIFTY"
+NEAREST_STRIKES = int(os.getenv("NEAREST_STRIKES", 10))
+ALERT_TOP_N = int(os.getenv("ALERT_TOP_N", 3))
+SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "Nifty_OI_Alerts_and_History_pctCOI")
+HISTORY_SHEET = os.getenv("HISTORY_SHEET", "history")
+ALERTS_SHEET = os.getenv("ALERTS_SHEET", "alerts")
 
-SERVICE_ACCOUNT_FILE = "/home/ard/analog-reef-457516-d0-89be45703eea.json"
-FALLBACK_CSV = "/home/ard/fallback.csv"
-ALLOW_FALLBACK = True
+# service account path (set by CI/workflow or local env)
+SERVICE_ACCOUNT_FILE = os.getenv(
+    "SERVICE_ACCOUNT_FILE",
+    "/home/ard/analog-reef-457516-d0-89be45703eea.json"
+)
+
+# no fallback CSV: removed
+ALLOW_FALLBACK = False
 
 MIN_PREV_OI_DENOM = 1e-9
-MIN_POSITIVE_PCT = 0.0001
-VERBOSE_FETCH = True
+MIN_POSITIVE_PCT = float(os.getenv("MIN_POSITIVE_PCT", "0.0001"))
+VERBOSE_FETCH = os.getenv("VERBOSE_FETCH", "true").lower() in ("1", "true", "yes")
 
 # NSE API Configuration
 NSE_BASE_URL = "https://www.nseindia.com"
@@ -124,9 +133,7 @@ def fetch_option_chain_direct(symbol="NIFTY", retries=3):
             print(f"Proxy error on attempt {attempt + 1}: {e}")
             if attempt == retries - 1:
                 raise RuntimeError(
-                    "PythonAnywhere free tier blocks NSE website. "
-                    "Solutions: (1) Upgrade to paid account, (2) Use fallback CSV, "
-                    "(3) Deploy to Heroku/Railway/other platform"
+                    "Proxy error / blocked. Solutions: (1) Use a different host, (2) Increase retries/delays, (3) Use a paid hosting provider"
                 )
         except Exception as e:
             print(f"Error on attempt {attempt + 1}: {e}")
@@ -178,55 +185,6 @@ def pick_nearest(df, underlying, n=10):
     df2['dist'] = (df2['strike'] - underlying).abs()
     sel = df2.sort_values('dist').head(n).sort_values('strike').reset_index(drop=True)
     return sel
-
-def load_fallback_csv(csv_path):
-    """Load and process fallback CSV data"""
-    try:
-        print(f"Loading fallback CSV: {csv_path}")
-        tmp = pd.read_csv(csv_path)
-        
-        if tmp.empty:
-            print("Fallback CSV is empty")
-            return None, None
-        
-        cols_l = {c.lower(): c for c in tmp.columns}
-        
-        def find_col(patterns):
-            for k, orig in cols_l.items():
-                for p in patterns:
-                    if p in k:
-                        return orig
-            return None
-        
-        strike_col = find_col(['strike'])
-        if not strike_col:
-            print("Fallback CSV missing strike column")
-            return None, None
-        
-        def numeric(col):
-            if col:
-                return pd.to_numeric(tmp[col], errors='coerce').fillna(0)
-            return pd.Series([0] * len(tmp))
-        
-        df = pd.DataFrame({
-            'strike': tmp[strike_col],
-            'CE_OI': numeric(find_col(['ce_oi', 'call_oi', 'calls_oi'])).astype(int),
-            'CE_COI': numeric(find_col(['ce_coi', 'ce_change', 'call_change'])).astype(int),
-            'CE_IV': numeric(find_col(['ce_iv', 'call_iv'])),
-            'PE_OI': numeric(find_col(['pe_oi', 'put_oi', 'puts_oi'])).astype(int),
-            'PE_COI': numeric(find_col(['pe_coi', 'pe_change', 'put_change'])).astype(int),
-            'PE_IV': numeric(find_col(['pe_iv', 'put_iv']))
-        }).drop_duplicates(subset=['strike']).sort_values('strike').reset_index(drop=True)
-        
-        underlying = (df['strike'].min() + df['strike'].max()) / 2
-        
-        print(f"✓ Loaded fallback CSV: {len(df)} strikes, underlying≈{underlying:.0f}")
-        return df, underlying
-        
-    except Exception as ex:
-        print(f"Fallback CSV error: {ex}")
-        traceback.print_exc()
-        return None, None
 
 # ---------------- Google Sheets helpers ----------------
 def sheets_client_from_service_account(json_path):
@@ -287,19 +245,9 @@ def main():
         if VERBOSE_FETCH:
             traceback.print_exc()
     
-    # 2) Fallback to CSV if needed
-    if (df is None or df.empty) and ALLOW_FALLBACK:
-        if os.path.exists(FALLBACK_CSV):
-            df, underlying = load_fallback_csv(FALLBACK_CSV)
-        else:
-            print(f"Fallback CSV not found: {FALLBACK_CSV}")
-    
+    # No fallback logic — exit if no data
     if df is None or df.empty:
-        print("\n✗ No usable data available. Exiting.\n")
-        print("SOLUTIONS:")
-        print("1. Create a fallback CSV at:", FALLBACK_CSV)
-        print("2. Upgrade PythonAnywhere to paid tier")
-        print("3. Use alternative hosting (Heroku, Railway, etc.)")
+        print("\n✗ No usable NSE data available. Exiting.\n")
         return
     
     # 3) Select nearest strikes
