@@ -1,7 +1,8 @@
 name: nifty-cron
+
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/5 * * * *"   # runs every 5 minutes (UTC); GitHub minimum is 5 minutes
   workflow_dispatch:
 
 jobs:
@@ -26,7 +27,7 @@ jobs:
           NIFTY_SA_JSON: ${{ secrets.NIFTY_SA_JSON }}
         run: |
           if [ -z "$NIFTY_SA_JSON" ]; then
-            echo "ERROR: Secret NIFTY_SA_JSON is missing."
+            echo "ERROR: Secret NIFTY_SA_JSON is missing. Add it in Settings → Secrets and variables → Actions."
             exit 1
           fi
 
@@ -38,10 +39,3 @@ jobs:
           SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
           SYMBOL: ${{ secrets.SYMBOL }}
         run: python nifty.py
-
-      - name: Upload output artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nifty-output
-          path: output.json
