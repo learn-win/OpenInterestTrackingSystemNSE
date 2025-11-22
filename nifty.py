@@ -8,6 +8,7 @@ Fetches option-chain from NSE, computes pct-COI ranking, and logs alerts/history
 Notes:
 - SERVICE_ACCOUNT_FILE is read from environment variable SERVICE_ACCOUNT_FILE (recommended).
 - No fallback CSV mechanism is present.
+- Adds an "execution_log" worksheet and appends timestamped start/complete/fail rows.
 """
 
 import os
@@ -218,6 +219,24 @@ def ensure_worksheet(spreadsheet, title, header_row):
         ws.append_row(header_row)
         return ws, True
 
+def append_execution_log(spreadsheet, status, details=""):
+    """
+    Ensure 'execution_log' worksheet exists and append a row:
+    [timestamp_utc, status, details]
+    status: STARTED / COMPLETED / FAILED
+    """
+    try:
+        header = ["timestamp_utc", "status", "details"]
+        ws, created = ensure_worksheet(spreadsheet, "execution_log", header)
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        row = [ts, status, details[:500]]  # limit details length to 500 chars
+        ws.append_row(row, value_input_option='USER_ENTERED')
+        print(f"✓ execution_log appended: {status} @ {ts}")
+    except Exception as e:
+        print(f"Warning: Failed to write execution_log: {e}")
+        if VERBOSE_FETCH:
+            traceback.print_exc()
+
 # ---------------- Main logic ----------------
 def main():
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -225,6 +244,21 @@ def main():
     print(f"[{ts}] Starting single-run for {SYMBOL}")
     print(f"{'='*60}\n")
     
+    # Try to create Sheets client early so we can log start
+    client = None
+    spreadsheet = None
+    try:
+        client = sheets_client_from_service_account(SERVICE_ACCOUNT_FILE)
+        spreadsheet, created = open_or_create_spreadsheet(client, SPREADSHEET_NAME)
+        print(f"✓ {'Created' if created else 'Opened'} spreadsheet: {SPREADSHEET_NAME}")
+        # Append STARTED row
+        append_execution_log(spreadsheet, status="STARTED", details=f"Run for {SYMBOL} started")
+    except Exception as e:
+        print(f"Warning: Could not initialize Sheets client for execution_log: {e}")
+        if VERBOSE_FETCH:
+            traceback.print_exc()
+        # continue without stopping — we'll still attempt data fetch and later create client again before writing alerts/history
+
     # 1) Try to fetch option chain data
     data = None
     df = None
@@ -244,10 +278,22 @@ def main():
         print(f"\n✗ Primary fetch failed: {e}\n")
         if VERBOSE_FETCH:
             traceback.print_exc()
+        # Try to log failure to execution_log if possible
+        try:
+            if spreadsheet:
+                append_execution_log(spreadsheet, status="FAILED", details=f"NSE fetch failed: {e}")
+        except:
+            pass
     
     # No fallback logic — exit if no data
     if df is None or df.empty:
         print("\n✗ No usable NSE data available. Exiting.\n")
+        # log failed completion
+        try:
+            if spreadsheet:
+                append_execution_log(spreadsheet, status="FAILED", details="No usable NSE data")
+        except:
+            pass
         return
     
     # 3) Select nearest strikes
@@ -258,21 +304,27 @@ def main():
     print(sel[['strike', 'CE_OI', 'CE_COI', 'PE_OI', 'PE_COI']].to_string(index=False))
     print('='*60 + '\n')
     
-    # 4) Connect to Google Sheets
+    # 4) Connect to Google Sheets (again if initial creation failed)
     try:
-        client = sheets_client_from_service_account(SERVICE_ACCOUNT_FILE)
-        print("✓ Connected to Google Sheets")
+        if not client:
+            client = sheets_client_from_service_account(SERVICE_ACCOUNT_FILE)
+        if not spreadsheet:
+            spreadsheet, created = open_or_create_spreadsheet(client, SPREADSHEET_NAME)
+            print(f"✓ {'Created' if created else 'Opened'} spreadsheet: {SPREADSHEET_NAME}")
     except Exception as e:
         print(f"✗ Failed to create Sheets client: {e}")
         traceback.print_exc()
+        # attempt to log failure
+        try:
+            if spreadsheet:
+                append_execution_log(spreadsheet, status="FAILED", details=f"Sheets client init failed: {e}")
+        except:
+            pass
         return
     
-    sh, created = open_or_create_spreadsheet(client, SPREADSHEET_NAME)
-    print(f"✓ {'Created' if created else 'Opened'} spreadsheet: {SPREADSHEET_NAME}")
-    
-    ws_hist, _ = ensure_worksheet(sh, HISTORY_SHEET, 
+    ws_hist, _ = ensure_worksheet(spreadsheet, HISTORY_SHEET, 
         ["timestamp", "symbol", "underlying", "strike", "CE_OI", "CE_COI", "CE_IV", "PE_OI", "PE_COI", "PE_IV"])
-    ws_alerts, _ = ensure_worksheet(sh, ALERTS_SHEET,
+    ws_alerts, _ = ensure_worksheet(spreadsheet, ALERTS_SHEET,
         ["timestamp", "symbol", "underlying", "event_rank", "event_type", "strike", "side", "pct_coi", "details"])
     
     # 5) Read previous snapshot
@@ -309,8 +361,18 @@ def main():
             ws_hist.append_rows(hist_rows, value_input_option='USER_ENTERED')
             print(f"✓ Appended {len(hist_rows)} history rows")
             print("\nℹ️  No previous snapshot for comparison. Run again later to generate alerts.")
+            # Log completed (no alerts)
+            try:
+                append_execution_log(spreadsheet, status="COMPLETED", details="No previous snapshot; history appended")
+            except:
+                pass
         except Exception as e:
             print(f"✗ Failed to append history: {e}")
+            # Log failed history write
+            try:
+                append_execution_log(spreadsheet, status="FAILED", details=f"Failed to append history: {e}")
+            except:
+                pass
         return
     
     # 7) Calculate pct_coi and generate alerts
@@ -380,6 +442,11 @@ def main():
         except Exception as e:
             print(f"✗ Failed to write alerts: {e}")
             traceback.print_exc()
+            # record failure in execution_log
+            try:
+                append_execution_log(spreadsheet, status="FAILED", details=f"Failed to write alerts: {e}")
+            except:
+                pass
     else:
         print("ℹ️  No alerts by pct-COI ranking this run")
     
@@ -391,7 +458,17 @@ def main():
     except Exception as e:
         print(f"✗ Failed to append history: {e}")
         traceback.print_exc()
-    
+        try:
+            append_execution_log(spreadsheet, status="FAILED", details=f"Failed to append history: {e}")
+        except:
+            pass
+
+    # Finalize: log completion
+    try:
+        append_execution_log(spreadsheet, status="COMPLETED", details="Run completed successfully")
+    except:
+        pass
+
     print(f"\n{'='*60}")
     print("✓ Run completed successfully")
     print(f"{'='*60}\n")
@@ -401,8 +478,27 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n⏹️  Interrupted by user")
-        sys.exit(0)
+        try:
+            # attempt to log interruption
+            client = None
+            try:
+                client = sheets_client_from_service_account(SERVICE_ACCOUNT_FILE)
+                sh, _ = open_or_create_spreadsheet(client, SPREADSHEET_NAME)
+                append_execution_log(sh, status="FAILED", details="Interrupted by user")
+            except:
+                pass
+        finally:
+            sys.exit(0)
     except Exception as e:
         print(f"\n✗ Unhandled exception: {e}")
         traceback.print_exc()
-        sys.exit(2)
+        try:
+            client = None
+            try:
+                client = sheets_client_from_service_account(SERVICE_ACCOUNT_FILE)
+                sh, _ = open_or_create_spreadsheet(client, SPREADSHEET_NAME)
+                append_execution_log(sh, status="FAILED", details=f"Unhandled exception: {e}")
+            except:
+                pass
+        finally:
+            sys.exit(2)
