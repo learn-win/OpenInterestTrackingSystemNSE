@@ -2,8 +2,8 @@ name: nifty-cron
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC) — change if needed
-  workflow_dispatch:        # allows manual trigger
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   run-nifty:
@@ -23,21 +23,21 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Write service account JSON (from secret)
-        if: ${{ secrets.NIFTY_SA_JSON != '' }}
         env:
           NIFTY_SA_JSON: ${{ secrets.NIFTY_SA_JSON }}
         run: |
-          # write the secret to a file without expansion and secure permissions
+          if [ -z "$NIFTY_SA_JSON" ]; then
+            echo "ERROR: Secret NIFTY_SA_JSON is missing."
+            exit 1
+          fi
+
           printf '%s' "$NIFTY_SA_JSON" > service-account.json
           chmod 600 service-account.json
 
       - name: Run nifty.py
         env:
-          # script reads SERVICE_ACCOUNT_FILE via os.getenv(...)
           SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
-          # optional overrides (set these as secrets if you want to change)
           SYMBOL: ${{ secrets.SYMBOL }}
-          ALLOW_FALLBACK: ${{ secrets.ALLOW_FALLBACK }}
         run: python nifty.py
 
       - name: Upload output artifact
