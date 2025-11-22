@@ -2,12 +2,8 @@ name: nifty-cron
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC). Adjust if needed
-  workflow_dispatch:        # allows manual run from Actions UI
-
-permissions:
-  contents: read
-  actions: read
+    - cron: "*/5 * * * *"   # every 5 minutes (UTC) — change if needed
+  workflow_dispatch:        # allows manual trigger
 
 jobs:
   run-nifty:
@@ -15,10 +11,10 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
@@ -28,24 +24,23 @@ jobs:
 
       - name: Write service account JSON (from secret)
         if: ${{ secrets.NIFTY_SA_JSON != '' }}
+        env:
+          NIFTY_SA_JSON: ${{ secrets.NIFTY_SA_JSON }}
         run: |
-          echo "$NIFTY_SA_JSON" > service-account.json
+          # write the secret to a file without expansion and secure permissions
+          printf '%s' "$NIFTY_SA_JSON" > service-account.json
           chmod 600 service-account.json
-        shell: bash
 
       - name: Run nifty.py
         env:
-          # Path to service account file the script expects
+          # script reads SERVICE_ACCOUNT_FILE via os.getenv(...)
           SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
-          # If you prefer, you can configure these values as secrets or variables:
-          SYMBOL: ${{ secrets.SYMBOL }}                # optional (or leave in script)
-          FALLBACK_CSV: ${{ secrets.FALLBACK_CSV }}    # optional path or repo file
-          ALLOW_FALLBACK: ${{ secrets.ALLOW_FALLBACK }}# optional "true"/"false"
-        run: |
-          python nifty.py
-        shell: bash
+          # optional overrides (set these as secrets if you want to change)
+          SYMBOL: ${{ secrets.SYMBOL }}
+          ALLOW_FALLBACK: ${{ secrets.ALLOW_FALLBACK }}
+        run: python nifty.py
 
-      - name: Upload output artifact (output.json if present)
+      - name: Upload output artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
